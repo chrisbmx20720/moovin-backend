@@ -9,7 +9,7 @@ import pytesseract
 import fitz  # PyMuPDF para manejar PDFs
 
 
-# Configurar Tesseract
+# Configuracion Tesseract
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
@@ -93,16 +93,119 @@ class LeerArchivoPdf(APIView):
 
         return resultados
 
-    # Método POST para procesar el archivo PDF
+   
     def post(self, request, *args, **kwargs):
         pdf_file = request.FILES.get('archivo_pdf')
 
-        if not pdf_file:
-            return Response({"error": "No se ha proporcionado ningún archivo PDF"}, status=400)
+       
 
         try:
-            resultados = self.procesar_pdf(pdf_file)
-            return Response(resultados, status=200)
-        except Exception as e:
-            return Response({"error": f"Error al procesar el archivo PDF: {str(e)}"}, status=500)
+            
+            if not pdf_file:
+             return Response({"error": "No se ha proporcionado ningún archivo PDF"}, status=400)
+            print("✅ Archivo PDF recibido")
 
+            # Procesar el PDF y extraer el texto
+            resultados = self.procesar_pdf(pdf_file)
+            print(f"✅ Resultados extraídos: {resultados}")
+
+            
+            # Convertimos cada diccionario a JSON para convertirlo en una cadena
+            texto_extraido = '\n'.join([json.dumps(res['Datos'], ensure_ascii=False) for res in resultados])
+
+            # Cargar las credenciales de Google
+            creds = cargar_credenciales()
+            print("✅ Credenciales cargadas correctamente") 
+
+            # Crear el documento en Google Docs
+            document_id = crear_documento_google(creds, texto_extraido)
+            if document_id:
+                print(f'Documento creado con ID: {document_id}')
+
+            # Subir el archivo a Google Drive
+            file_id = subir_archivo_drive(creds, texto_extraido)
+            if file_id:
+                print(f'Archivo subido con ID: {file_id}')
+
+            # Responder al frontend con los datos procesados
+            return Response(resultados, status=200)
+
+        except Exception as e:
+            return Response({"error": f"Error al procesar el archivo PDF: {str(e)}"}, status=500) 
+import os
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+import pickle
+from googleapiclient.http import MediaInMemoryUpload  # Importar MediaInMemoryUpload
+from google.auth.transport.requests import Request  # Importar Request para actualizar las credenciales
+
+# Definir los alcances para Google Docs y Drive
+SCOPES = ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/documents']
+
+# Función para cargar las credenciales de Google
+def cargar_credenciales():
+    """Maneja la autenticación con Google y devuelve un objeto de autorización"""
+    creds = None
+    # El archivo token.pickle almacena las credenciales del usuario
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+
+    # Si no hay credenciales (o son inválidas), pide autorización al usuario.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                "../Backend/api/google_credentials/credentials.json", SCOPES)
+            creds = flow.run_local_server(port=5173 )
+        
+        # Guardar las credenciales para la próxima vez
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+
+    return creds
+
+# Función para crear un documento en Google Docs
+def crear_documento_google(creds, texto):
+    try:
+        service = build('docs', 'v1', credentials=creds)
+        document = service.documents().create().execute()
+        document_id = document['documentId']
+        
+        # Insertar el texto extraído del PDF en el documento de Google Docs
+        requests = [
+            {
+                'insertText': {
+                    'location': {
+                        'index': 1
+                    },
+                    'text': texto
+                }
+            }
+        ]
+        service.documents().batchUpdate(documentId=document_id, body={'requests': requests}).execute()
+        return document_id
+    except HttpError as err:
+        print(f"Error al crear el documento: {err}")
+        return None
+
+# Función para subir un archivo a Google Drive
+def subir_archivo_drive(creds, texto, nombre_archivo="documento_extraido.txt"):
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        file_metadata = {'name': nombre_archivo, 'mimeType': 'text/plain'}
+        media = MediaInMemoryUpload(texto.encode(), mimetype='text/plain')
+
+        file = service.files().create(
+            media_body=media,
+            body=file_metadata,
+            fields='id'
+        ).execute()
+        
+        return file.get('id')
+    except HttpError as err:
+        print(f"Error al subir archivo: {err}")
+        return None
